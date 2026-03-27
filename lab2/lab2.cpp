@@ -94,18 +94,14 @@ void linearExecution(const vector<int> &data, int &xorResult)
 
 void processSectionWithMutex(int start, int end, const vector<int> &data, int &globalXor, mutex &mtx)
 {
-    int localXor = 0;
-
     for (int i = start; i < end; ++i)
     {
         if (data[i] % 7 == 0)
         {
-            localXor ^= data[i];
+            lock_guard<mutex> lock(mtx);
+            globalXor ^= data[i];
         }
     }
-
-    lock_guard<mutex> lock(mtx);
-    globalXor ^= localXor;
 }
 
 void parallelWithMutex(const vector<int> &data, int &xorResult, int numThreads)
