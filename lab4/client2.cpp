@@ -58,10 +58,10 @@ string recvMsg(SOCKET sock)
     if (recvAll(sock, reinterpret_cast<char *>(&netLen), sizeof(netLen)) != sizeof(netLen))
         return "";
     uint32_t len = ntohl(netLen);
-    if (len == 0 || len > 65536)
+    if (len == 0 || len > 1024 * 1024)
         return "";
     string msg(len, '\0');
-    if (recvAll(sock, &msg[0], len) != (int)len)
+    if (recvAll(sock, &msg[0], (int)len) != (int)len)
         return "";
     return msg;
 }
@@ -79,68 +79,139 @@ void clientThread()
 
     if (connect(sock, (sockaddr *)&serverAddr, sizeof(serverAddr)) != 0)
     {
-        cerr << "[CLIENT2] Connection failed" << endl;
+        cerr << "Connection failed: " << WSAGetLastError() << endl;
+        WSACleanup();
         return;
     }
-    cout << "[CLIENT2] Connected to server" << endl;
+    cout << "Connected to server" << endl;
 
-    sendMsg(sock, "HELLO");
-    cout << "[SERVER] " << recvMsg(sock) << endl;
+    if (!sendMsg(sock, "HELLO"))
+    {
+        cerr << "Failed to send HELLO" << endl;
+        return;
+    }
+    string resp = recvMsg(sock);
+    if (resp.empty())
+    {
+        cerr << "No response to HELLO" << endl;
+        return;
+    }
+    cout << "[SERVER] " << resp << endl;
 
-    int matrixSize = 300;
+    int matrixSize = 20000;
     vector<vector<int>> matrix(matrixSize, vector<int>(matrixSize));
-    srand(99);
+    srand(42);
     for (auto &row : matrix)
         for (auto &val : row)
             val = rand() % 1001;
 
-    vector<int> threadConfig = {1, 2, 4};
+    vector<int> threadConfig = {1, 2, 4, 8, 16, 32, 64};
 
-    sendMsg(sock, "SEND_DATA");
+    if (!sendMsg(sock, "SEND_DATA"))
+    {
+        cerr << "Failed to send SEND_DATA" << endl;
+        return;
+    }
 
     DataHeader header;
-    header.matrix_size = htonl(matrixSize);
+    header.matrix_size = htonl((uint32_t)matrixSize);
     header.thread_count = htonl((uint32_t)threadConfig.size());
-    header.data_length = htonl(matrixSize * matrixSize * sizeof(int));
+    header.data_length = htonl((uint32_t)(matrixSize * matrixSize * sizeof(int)));
+
     sendAll(sock, reinterpret_cast<char *>(&header), sizeof(header));
 
     vector<int> configNet(threadConfig.size());
     for (size_t i = 0; i < threadConfig.size(); ++i)
         configNet[i] = htonl(threadConfig[i]);
-    sendAll(sock, reinterpret_cast<char *>(configNet.data()), (int)(configNet.size() * sizeof(int)));
+    sendAll(sock, reinterpret_cast<char *>(configNet.data()),
+            (int)(configNet.size() * sizeof(int)));
 
     vector<int> flatNet(matrixSize * matrixSize);
     for (int i = 0; i < matrixSize; ++i)
         for (int j = 0; j < matrixSize; ++j)
             flatNet[i * matrixSize + j] = htonl(matrix[i][j]);
-    sendAll(sock, reinterpret_cast<char *>(flatNet.data()), (int)(flatNet.size() * sizeof(int)));
+    sendAll(sock, reinterpret_cast<char *>(flatNet.data()),
+            (int)(flatNet.size() * sizeof(int)));
 
-    cout << "[SERVER] " << recvMsg(sock) << endl;
+    resp = recvMsg(sock);
+    if (resp.empty())
+    {
+        cerr << "No response to SEND_DATA" << endl;
+        return;
+    }
+    cout << "[SERVER] " << resp << endl;
 
-    sendMsg(sock, "START_COMPUTATION");
-    cout << "[SERVER] " << recvMsg(sock) << endl;
+    if (!sendMsg(sock, "START_COMPUTATION"))
+    {
+        cerr << "Failed to send START_COMPUTATION" << endl;
+        return;
+    }
+
+    resp = recvMsg(sock);
+    if (resp.empty())
+    {
+        cerr << "No response to START_COMPUTATION" << endl;
+        return;
+    }
+    cout << "[SERVER] " << resp << endl;
 
     atomic<bool> done(false);
+
     thread listener([&sock, &done]()
                     {
         while (!done) {
             string msg = recvMsg(sock);
-            if (msg.empty()) break;
-            cout << "[SERVER->CLIENT2] " << msg << endl;
-            if (msg.find("COMPUTATION_COMPLETE") != string::npos)
+            if (msg.empty()) {
+                cerr << "[LISTENER] Connection lost" << endl;
                 done = true;
+                break;
+            }
+            cout << "[SERVER] " << msg << endl;
+            if (msg.find("COMPUTATION_COMPLETE") != string::npos) {
+                done = true;
+            }
         } });
+
+    while (!done)
+    {
+        this_thread::sleep_for(chrono::seconds(2));
+        if (!done)
+        {
+            sendMsg(sock, "GET_STATUS");
+        }
+    }
+
     listener.join();
 
-    sendMsg(sock, "GET_RESULT");
-    cout << "[SERVER] " << recvMsg(sock) << endl;
+    if (!sendMsg(sock, "GET_RESULT"))
+    {
+        cerr << "Failed to send GET_RESULT" << endl;
+    }
+    else
+    {
+        string result = recvMsg(sock);
+        if (result.empty())
+        {
+            cerr << "No result received" << endl;
+        }
+        else
+        {
+            cout << "\n========== RESULT ==========\n"
+                 << result << "\n============================" << endl;
+        }
+    }
+
+    this_thread::sleep_for(chrono::milliseconds(200));
 
     closesocket(sock);
     WSACleanup();
+    cout << "Done." << endl;
 }
 
 int main()
 {
     thread(clientThread).join();
+    cout << "\nPress Enter to exit...";
+    cin.get();
     return 0;
 }
